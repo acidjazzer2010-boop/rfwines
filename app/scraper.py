@@ -9,13 +9,12 @@ HEADERS = {
 }
 
 def parse_vino_svoe(db: SessionLocal):
-    """Парсинг списка и детальных данных виноделен с vino-svoe.ru"""
+    """Парсинг vino-svoe.ru"""
     print("[*] Запуск скрапинга vino-svoe.ru...")
     url = "https://vino-svoe.ru/wineries"
     try:
         res = requests.get(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
-            # Ищем Build ID для Nuxt Data
             build_match = re.search(r'/_nuxt/builds/meta/([a-f0-9\-]+)\.json', res.text)
             added = 0
             
@@ -31,16 +30,20 @@ def parse_vino_svoe(db: SessionLocal):
                     for item in raw_items:
                         if isinstance(item, dict) and item.get("name"):
                             name = item.get("name").strip()
-                            slug = item.get("slug") or item.get("id") or name.lower().replace(" ", "-")
+                            raw_slug = item.get("slug") or item.get("id") or name.lower().replace(" ", "-")
+                            slug = str(raw_slug).strip().lower()
                             
-                            # Пробуем подтянуть детальное описание по слагу
                             detail_desc = item.get("description", "")
                             detail_url = f"https://vino-svoe.ru/wineries/{slug}"
                             
-                            existing = db.query(Winery).filter(Winery.name == name).first()
+                            # Проверяем и по имени, и по слагу
+                            existing = db.query(Winery).filter(
+                                (Winery.name == name) | (Winery.slug == slug)
+                            ).first()
+                            
                             if not existing:
                                 db.add(Winery(
-                                    slug=str(slug),
+                                    slug=slug,
                                     name=name,
                                     region=item.get("region", "Россия"),
                                     description=detail_desc,
@@ -48,10 +51,11 @@ def parse_vino_svoe(db: SessionLocal):
                                     source_url=detail_url
                                 ))
                                 added += 1
-                            elif not existing.description and detail_desc:
-                                existing.description = detail_desc
-                                existing.slug = str(slug)
-                                existing.source_url = detail_url
+                            else:
+                                if not existing.description and detail_desc:
+                                    existing.description = detail_desc
+                                if not existing.slug:
+                                    existing.slug = slug
 
             # Запасной вариант парсинга HTML ссылок
             soup = BeautifulSoup(res.text, "lxml")
@@ -60,8 +64,10 @@ def parse_vino_svoe(db: SessionLocal):
                 href = a.get("href", "")
                 name = a.get_text(strip=True)
                 if name and len(name) > 2 and len(name) < 70 and href != "/wineries":
-                    slug = href.split("/")[-1]
-                    existing = db.query(Winery).filter(Winery.name == name).first()
+                    slug = href.split("/")[-1].strip().lower()
+                    existing = db.query(Winery).filter(
+                        (Winery.name == name) | (Winery.slug == slug)
+                    ).first()
                     if not existing:
                         db.add(Winery(
                             slug=slug,
@@ -77,7 +83,7 @@ def parse_vino_svoe(db: SessionLocal):
         print(f"[!] Ошибка vino-svoe.ru: {e}")
 
 def parse_vino_ru(db: SessionLocal):
-    """Парсинг vino.ru"""
+    """Парсинг vino.ru без дублирования слагов"""
     print("[*] Запуск скрапинга vino.ru...")
     url = "https://vino.ru/atlas-rossiyskikh-vinodelen/letters/"
     try:
@@ -91,8 +97,14 @@ def parse_vino_ru(db: SessionLocal):
                 href = item.get("href", "")
                 if name and len(name) > 2 and not name.startswith("Атлас") and href.count('/') > 3:
                     full_link = f"https://vino.ru{href}" if href.startswith('/') else href
-                    slug = href.strip('/').split('/')[-1]
-                    if not db.query(Winery).filter(Winery.name == name).first():
+                    slug = href.strip('/').split('/')[-1].strip().lower()
+                    
+                    # Проверяем уникальность по имени и по слагу!
+                    existing = db.query(Winery).filter(
+                        (Winery.name == name) | (Winery.slug == slug)
+                    ).first()
+                    
+                    if not existing:
                         db.add(Winery(
                             slug=slug,
                             name=name,
@@ -101,13 +113,18 @@ def parse_vino_ru(db: SessionLocal):
                             source_url=url
                         ))
                         added += 1
+                    else:
+                        # Если уже есть, обновляем ссылку если нужно
+                        if not existing.website:
+                            existing.website = full_link
+            
             db.commit()
             print(f"[✓] vino.ru: обработано {added} новых виноделен")
     except Exception as e:
         print(f"[!] Ошибка vino.ru: {e}")
 
 def seed_fallback_data(db: SessionLocal):
-    """Обновленные начальные данные с детальными описаниями"""
+    """Базовые данные с проверкой уникальности"""
     default_wineries = [
         {
             "slug": "51-parallel-winery",
@@ -140,13 +157,14 @@ def seed_fallback_data(db: SessionLocal):
     ]
     
     for w in default_wineries:
-        existing = db.query(Winery).filter(Winery.name == w["name"]).first()
+        existing = db.query(Winery).filter(
+            (Winery.name == w["name"]) | (Winery.slug == w["slug"])
+        ).first()
         if not existing:
             db.add(Winery(**w))
         else:
             if not existing.description or len(existing.description) < 20:
                 existing.description = w["description"]
-                existing.slug = w["slug"]
     db.commit()
 
 def run_scraper():
