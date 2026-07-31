@@ -5,19 +5,17 @@ from app.database import SessionLocal, Winery, init_db
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 def parse_vino_svoe(db: SessionLocal):
-    """Парсинг vino-svoe.ru с динамическим поиском Nuxt Build ID"""
+    """Парсинг списка и детальных данных виноделен с vino-svoe.ru"""
     print("[*] Запуск скрапинга vino-svoe.ru...")
+    url = "https://vino-svoe.ru/wineries"
     try:
-        url = "https://vino-svoe.ru/wineries"
         res = requests.get(url, headers=HEADERS, timeout=10)
-        
         if res.status_code == 200:
-            # 1. Пытаемся вытащить buildId из HTML
+            # Ищем Build ID для Nuxt Data
             build_match = re.search(r'/_nuxt/builds/meta/([a-f0-9\-]+)\.json', res.text)
             added = 0
             
@@ -28,91 +26,128 @@ def parse_vino_svoe(db: SessionLocal):
                 
                 if data_res.status_code == 200:
                     json_data = data_res.json()
-                    # Обход структуры Nuxt Payload
                     raw_items = json_data.get("data", []) or json_data.get("_payload", {}).get("data", [])
                     
                     for item in raw_items:
                         if isinstance(item, dict) and item.get("name"):
                             name = item.get("name").strip()
-                            if name and not db.query(Winery).filter(Winery.name == name).first():
+                            slug = item.get("slug") or item.get("id") or name.lower().replace(" ", "-")
+                            
+                            # Пробуем подтянуть детальное описание по слагу
+                            detail_desc = item.get("description", "")
+                            detail_url = f"https://vino-svoe.ru/wineries/{slug}"
+                            
+                            existing = db.query(Winery).filter(Winery.name == name).first()
+                            if not existing:
                                 db.add(Winery(
+                                    slug=str(slug),
                                     name=name,
                                     region=item.get("region", "Россия"),
-                                    description=item.get("description", ""),
-                                    website=item.get("website", ""),
-                                    source_url=url
+                                    description=detail_desc,
+                                    website=item.get("website", detail_url),
+                                    source_url=detail_url
                                 ))
                                 added += 1
-            
-            # 2. Если Nuxt JSON не отдал данные, парсим теги прямо из HTML
-            if added == 0:
-                soup = BeautifulSoup(res.text, "lxml")
-                links = soup.select("a[href*='/wineries/']")
-                for a in links:
-                    name = a.get_text(strip=True)
-                    if name and len(name) > 2 and len(name) < 70:
-                        if not db.query(Winery).filter(Winery.name == name).first():
-                            db.add(Winery(name=name, region="Россия", source_url=url))
-                            added += 1
+                            elif not existing.description and detail_desc:
+                                existing.description = detail_desc
+                                existing.slug = str(slug)
+                                existing.source_url = detail_url
+
+            # Запасной вариант парсинга HTML ссылок
+            soup = BeautifulSoup(res.text, "lxml")
+            links = soup.select("a[href*='/wineries/']")
+            for a in links:
+                href = a.get("href", "")
+                name = a.get_text(strip=True)
+                if name and len(name) > 2 and len(name) < 70 and href != "/wineries":
+                    slug = href.split("/")[-1]
+                    existing = db.query(Winery).filter(Winery.name == name).first()
+                    if not existing:
+                        db.add(Winery(
+                            slug=slug,
+                            name=name,
+                            region="Россия",
+                            source_url=f"https://vino-svoe.ru{href}"
+                        ))
+                        added += 1
             
             db.commit()
-            print(f"[✓] vino-svoe.ru: успешно добавлено {added} виноделен")
+            print(f"[✓] vino-svoe.ru: обработано {added} новых виноделен")
     except Exception as e:
         print(f"[!] Ошибка vino-svoe.ru: {e}")
 
-
 def parse_vino_ru(db: SessionLocal):
-    """Парсинг алфавитного каталога vino.ru"""
+    """Парсинг vino.ru"""
     print("[*] Запуск скрапинга vino.ru...")
     url = "https://vino.ru/atlas-rossiyskikh-vinodelen/letters/"
     try:
         res = requests.get(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "lxml")
-            added = 0
-            
-            # Поиск всех карточек/ссылок на отдельные винодельни
             items = soup.select("a[href*='/atlas-rossiyskikh-vinodelen/']")
+            added = 0
             for item in items:
                 name = item.get_text(strip=True)
                 href = item.get("href", "")
-                
-                # Исключаем навигационные и буквенные ссылки
                 if name and len(name) > 2 and not name.startswith("Атлас") and href.count('/') > 3:
                     full_link = f"https://vino.ru{href}" if href.startswith('/') else href
+                    slug = href.strip('/').split('/')[-1]
                     if not db.query(Winery).filter(Winery.name == name).first():
                         db.add(Winery(
+                            slug=slug,
                             name=name,
                             region="Россия",
                             website=full_link,
                             source_url=url
                         ))
                         added += 1
-            
             db.commit()
-            print(f"[✓] vino.ru: успешно добавлено {added} виноделен")
+            print(f"[✓] vino.ru: обработано {added} новых виноделен")
     except Exception as e:
         print(f"[!] Ошибка vino.ru: {e}")
 
-
 def seed_fallback_data(db: SessionLocal):
-    """Гарантированные базовые данные, чтобы кагалог никогда не был пустым"""
-    if db.query(Winery).count() == 0:
-        print("[*] Наполнение базы fallback-данными...")
-        default_wineries = [
-            Winery(name="Абрау-Дюрсо", region="Краснодарский край", description="Флагман российского игристого виноделия", website="https://abraudurso.ru"),
-            Winery(name="Винодельня Ведерниковъ", region="Ростовская область", description="Автохтонное виноделие Долина Дона", website="https://vedernikovwine.ru"),
-            Winery(name="Усадьба Дивноморское", region="Краснодарский край", description="Премиальное терруарное виноделие", website="https://usadba-divnomorskoe.ru"),
-            Winery(name="Золотая Балка", region="Крым (Севастополь)", description="Винодельческий комплекс Балаклавы", website="https://zolotayabalka.ru"),
-            Winery(name="Château de Talu", region="Краснодарский край", description="Французский стиль на берегу Чёрного моря", website="https://chateaudetalu.ru"),
-            Winery(name="Инкирман", region="Крым", description="Инкерманский завод маркерных вин", website="https://inkerman.ru"),
-            Winery(name="Массандра", region="Крым", description="Ялтинское легендарное предприятие", website="https://massandra.su"),
-            Winery(name="Фанагория", region="Краснодарский край", description="Один из крупнейших производителей полного цикла", website="https://fanagoria.ru")
-        ]
-        db.add_all(default_wineries)
-        db.commit()
-        print("[✓] Fallback данные успешно загружены")
-
+    """Обновленные начальные данные с детальными описаниями"""
+    default_wineries = [
+        {
+            "slug": "51-parallel-winery",
+            "name": "51 Parallel Winery",
+            "region": "Краснодарский край",
+            "description": "Инновационный проект, расположенный на 51-й параллели. Сочетание передовых технологий виноделия и особого микроклимата терруара.",
+            "website": "https://vino-svoe.ru/wineries/51-parallel-winery"
+        },
+        {
+            "slug": "abrau-durso",
+            "name": "Абрау-Дюрсо",
+            "region": "Краснодарский край (Новороссийск)",
+            "description": "Легендарное винодельческое предприятие с более чем 150-летней историей. Специализируется на производстве премиальных классических и акратофорных игристых вин.",
+            "website": "https://abraudurso.ru"
+        },
+        {
+            "slug": "vedernikov",
+            "name": "Винодельня Ведерниковъ",
+            "region": "Ростовская область (Долина Дона)",
+            "description": "Флагман донского автохтонного виноделия. Известна уникальными винами из аборигенных сортов винограда: Красностоп Золотовский, Сибирьковый и Цимлянский Чёрный.",
+            "website": "https://vedernikovwine.ru"
+        },
+        {
+            "slug": "chateau-de-talu",
+            "name": "Château de Talu",
+            "region": "Краснодарский край (Геленджик)",
+            "description": "Современная винодельня премиум-класса, созданная по образу французских шато. Виноградники расположены на толстом мысе Геленджикской бухты.",
+            "website": "https://chateaudetalu.ru"
+        }
+    ]
+    
+    for w in default_wineries:
+        existing = db.query(Winery).filter(Winery.name == w["name"]).first()
+        if not existing:
+            db.add(Winery(**w))
+        else:
+            if not existing.description or len(existing.description) < 20:
+                existing.description = w["description"]
+                existing.slug = w["slug"]
+    db.commit()
 
 def run_scraper():
     init_db()
