@@ -35,3 +35,47 @@ def init_db():
     import os
     os.makedirs("./data", exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    
+    # Автоматическое наполнение базовыми данными при первом запуске
+    db = SessionLocal()
+    try:
+        if db.query(Winery).count() == 0:
+            initial_wineries = [
+                Winery(
+                    name="Абрау-Дюрсо",
+                    region="Краснодарский край (Новороссийск)",
+                    description="Один из старейших и крупнейших производителей игристых и тихих вин в России.",
+                    website="https://abraudurso.ru"
+                ),
+                Winery(
+                    name="Усадьба Дивноморское",
+                    region="Краснодарский край (Геленджик)",
+                    description="Премиальное винодельческое хозяйство на берегу Чёрного моря.",
+                    website="https://usadba-divnomorskoe.ru"
+                ),
+                Winery(
+                    name="Винодельня Ведерниковъ",
+                    region="Ростовская область (Долина Дона)",
+                    description="Флагман донского автохтонного виноделия (Красностоп Золотовский, Сибирьковый).",
+                    website="https://vedernikovwine.ru"
+                ),
+                Winery(
+                    name="Золотая Балка",
+                    region="Крым (Севастополь)",
+                    description="Крупный производитель игристых и тихих вин в Балаклавской долине.",
+                    website="https://zolotayabalka.ru"
+                ),
+                Winery(
+                    name="Château de Talu",
+                    region="Краснодарский край (Геленджик)",
+                    description="Современная винодельня в французском стиле на побережье Чёрного моря.",
+                    website="https://chateaudetalu.ru"
+                )
+            ]
+            db.add_all(initial_wineries)
+            db.commit()
+            print("[✓] Базовые данные виноделен успешно загружены!")
+    except Exception as e:
+        print(f"[!] Ошибка инициализации базовых данных: {e}")
+    finally:
+        db.close()
