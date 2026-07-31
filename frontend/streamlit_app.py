@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 
-# Важно: URL без слэша на конце!
 API_URL = "https://rfwines.onrender.com"
 
 st.set_page_config(
@@ -14,30 +13,24 @@ st.set_page_config(
 st.title("🍷 Атлас и Каталог Виноделен России")
 st.markdown("Интерактивный справочник российских производителей вина.")
 
-# Боковое меню (Фильтры)
+# Боковое меню
 st.sidebar.header("Фильтры и Поиск")
 search_query = st.sidebar.text_input("Поиск по названию винодельни:")
 
 if st.sidebar.button("🔄 Обновить данные (сбросить кэш)"):
     st.cache_data.clear()
 
-# Загрузка данных с FastAPI
 @st.cache_data(ttl=60)
 def fetch_wineries(search: str = ""):
     try:
         params = {}
         if search:
             params["search"] = search
-        
-        # Запрос к эндпоинту /wineries
         res = requests.get(f"{API_URL}/wineries", params=params, timeout=10)
-        
         if res.status_code == 200:
             return res.json()
-        else:
-            st.error(f"Ошибка API (статус {res.status_code}): {res.text}")
     except Exception as e:
-        st.error(f"Не удалось подключиться к API backend ({API_URL}): {e}")
+        st.error(f"Ошибка связи с бэкендом: {e}")
     return []
 
 wineries = fetch_wineries(search_query)
@@ -57,18 +50,34 @@ with col2:
         selected_winery = next(w for w in wineries if w["name"] == selected_winery_name)
         
         st.header(selected_winery["name"])
-        st.write(f"**Регион:** {selected_winery.get('region') or 'Не указан'}")
         
-        if selected_winery.get("website"):
-            st.markdown(f"[Официальный сайт]({selected_winery['website']})")
-            
-        st.markdown("### Описание")
-        st.write(selected_winery.get("description") or "Описание пока не добавлено.")
+        # Информационная плашка
+        sub_col1, sub_col2 = st.columns(2)
+        with sub_col1:
+            st.write(f"📍 **Регион:** {selected_winery.get('region') or 'Россия'}")
+        with sub_col2:
+            if selected_winery.get("website"):
+                st.markdown(f"🌐 [Перейти на сайт]({selected_winery['website']})")
 
-        st.markdown("### Вина производителя")
+        st.divider()
+
+        # Описание производителя
+        st.markdown("### 📖 Описание производителя")
+        desc = selected_winery.get("description")
+        if desc and len(desc.strip()) > 0:
+            st.info(desc)
+        else:
+            st.write("_Подробное описание в процессе наполнения._")
+            if selected_winery.get("source_url"):
+                st.markdown(f"Подробнее на источнике: [Карточка винодельни]({selected_winery['source_url']})")
+
+        st.divider()
+
+        # Вина
+        st.markdown("### 🍾 Вина производителя")
         wines = selected_winery.get("wines", [])
         if wines:
             df_wines = pd.DataFrame(wines)
             st.dataframe(df_wines, use_container_width=True)
         else:
-            st.info("Список вин для данной винодельни пока пуст.")
+            st.caption("Список вин для данной винодельни пока формируется.")
