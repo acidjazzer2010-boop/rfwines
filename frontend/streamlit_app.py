@@ -2,7 +2,8 @@ import streamlit as st
 import requests
 import pandas as pd
 
-API_URL = "https://rfwines.onrender.com/"
+# Важно: URL без слэша на конце!
+API_URL = "https://rfwines.onrender.com"
 
 st.set_page_config(
     page_title="Атлас Виноделен России",
@@ -17,6 +18,9 @@ st.markdown("Интерактивный справочник российски�
 st.sidebar.header("Фильтры и Поиск")
 search_query = st.sidebar.text_input("Поиск по названию винодельни:")
 
+if st.sidebar.button("🔄 Обновить данные (сбросить кэш)"):
+    st.cache_data.clear()
+
 # Загрузка данных с FastAPI
 @st.cache_data(ttl=60)
 def fetch_wineries(search: str = ""):
@@ -24,11 +28,16 @@ def fetch_wineries(search: str = ""):
         params = {}
         if search:
             params["search"] = search
-        res = requests.get(f"{API_URL}/wineries", params=params)
+        
+        # Запрос к эндпоинту /wineries
+        res = requests.get(f"{API_URL}/wineries", params=params, timeout=10)
+        
         if res.status_code == 200:
             return res.json()
+        else:
+            st.error(f"Ошибка API (статус {res.status_code}): {res.text}")
     except Exception as e:
-        st.error(f"Не удалось подключиться к API backend: {e}")
+        st.error(f"Не удалось подключиться к API backend ({API_URL}): {e}")
     return []
 
 wineries = fetch_wineries(search_query)
