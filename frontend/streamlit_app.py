@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 
-API_URL = "http://127.0.0.1:8000"
+API_URL = "https://rfwines-backend.onrender.com"
 
 st.set_page_config(
     page_title="Атлас Виноделен России",
