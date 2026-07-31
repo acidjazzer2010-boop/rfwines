@@ -35,4 +35,9 @@ class Wine(Base):
 def init_db():
     import os
     os.makedirs("./data", exist_ok=True)
+    
+    # Если структура изменилась, при необходимости можно пересоздать файл БД
+    db_file = "./data/wines.db"
+    
+    # Создаем таблицы
     Base.metadata.create_all(bind=engine)
