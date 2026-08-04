@@ -5,79 +5,104 @@ from app.database import SessionLocal, Winery, init_db
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+    "Accept": "application/json, text/plain, */*",
 }
 
-def parse_vino_svoe(db: SessionLocal):
-    """Безопасный парсинг vino-svoe.ru без блокировок Cloudflare"""
-    print("[*] Запуск скрапинга vino-svoe.ru...")
-    url = "https://vino-svoe.ru/wineries"
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            build_match = re.search(r'/_nuxt/builds/meta/([a-f0-9\-]+)\.json', res.text)
-            added = 0
-            
-            if build_match:
-                build_id = build_match.group(1)
-                data_url = f"https://vino-svoe.ru/_nuxt/builds/data/{build_id}/wineries.json"
-                data_res = requests.get(data_url, headers=HEADERS, timeout=10)
-                
-                if data_res.status_code == 200:
-                    json_data = data_res.json()
-                    raw_items = json_data.get("data", []) or json_data.get("_payload", {}).get("data", [])
-                    
-                    for item in raw_items:
-                        if isinstance(item, dict) and item.get("name"):
-                            try:
-                                name = item.get("name").strip()
-                                raw_slug = item.get("slug") or item.get("id") or name.lower().replace(" ", "-")
-                                slug = str(raw_slug).strip().lower()
-                                
-                                # Забираем все доступные текстовые поля из JSON
-                                desc = (
-                                    item.get("description") or 
-                                    item.get("about") or 
-                                    item.get("shortDescription") or 
-                                    item.get("text") or ""
-                                ).strip()
-                                
-                                detail_url = f"https://vino-svoe.ru/wineries/{slug}"
-                                
-                                existing = db.query(Winery).filter(
-                                    (Winery.name == name) | (Winery.slug == slug)
-                                ).first()
-                                
-                                if not existing:
-                                    db.add(Winery(
-                                        slug=slug,
-                                        name=name,
-                                        region=item.get("region", "Россия"),
-                                        description=desc,
-                                        website=item.get("website", detail_url),
-                                        source_url=detail_url
-                                    ))
-                                    added += 1
-                                else:
-                                    if desc and len(desc) > len(existing.description or ""):
-                                        existing.description = desc
-                                    if not existing.slug:
-                                        existing.slug = slug
-                            except Exception:
-                                continue
+# Известные версии сборки Nuxt 3 (прямой доступ к статике без блокировки Cloudflare)
+FALLBACK_BUILD_IDS = [
+    "eda8a7f0-aa81-4ec2-bb4a-8798f29e7ea7"
+]
 
-            db.commit()
-            print(f"[✓] vino-svoe.ru: обработано {added} виноделен")
-    except Exception as e:
-        print(f"[!] Ошибка vino-svoe.ru: {e}")
+def get_nuxt_build_id():
+    """Пытается вытащить ID сборки из HTML, либо использует гарантированный fallback"""
+    try:
+        res = requests.get("https://vino-svoe.ru/wineries", headers=HEADERS, timeout=5)
+        if res.status_code == 200:
+            match = re.search(r'/_nuxt/builds/meta/([a-f0-9\-]+)\.json', res.text)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return FALLBACK_BUILD_IDS[0]
+
+def parse_vino_svoe(db: SessionLocal):
+    """Прямой сбор каталога из статического JSON Nuxt 3"""
+    print("[*] Запуск скрапинга vino-svoe.ru...")
+    build_id = get_nuxt_build_id()
+    
+    # Пробуем варианты прямых URL с данными
+    urls_to_try = [
+        f"https://vino-svoe.ru/_nuxt/builds/data/{build_id}/wineries.json",
+        f"https://vino-svoe.ru/_nuxt/builds/data/{FALLBACK_BUILD_IDS[0]}/wineries.json"
+    ]
+    
+    raw_items = []
+    for data_url in urls_to_try:
+        try:
+            res = requests.get(data_url, headers=HEADERS, timeout=8)
+            if res.status_code == 200:
+                json_data = res.json()
+                if isinstance(json_data, dict):
+                    raw_items = json_data.get("data", []) or json_data.get("_payload", {}).get("data", [])
+                    if not raw_items and "_payload" in json_data:
+                        raw_items = [v for v in json_data["_payload"].values() if isinstance(v, dict) and "name" in v]
+                elif isinstance(json_data, list):
+                    raw_items = json_data
+                
+                if raw_items:
+                    break
+        except Exception as e:
+            print(f"[!] Ошибка запроса к {data_url}: {e}")
+            
+    added = 0
+    if raw_items:
+        for item in raw_items:
+            if isinstance(item, dict) and item.get("name"):
+                try:
+                    name = str(item.get("name")).strip()
+                    if not name or name == "None":
+                        continue
+                        
+                    raw_slug = item.get("slug") or item.get("id") or name.lower().replace(" ", "-")
+                    slug = str(raw_slug).strip().lower()
+                    
+                    desc = str(item.get("description") or item.get("about") or item.get("shortDescription") or "").strip()
+                    if desc == "None":
+                        desc = ""
+                        
+                    region = str(item.get("region") or "Россия").strip()
+                    website = str(item.get("website") or f"https://vino-svoe.ru/wineries/{slug}").strip()
+                    
+                    existing = db.query(Winery).filter(
+                        (Winery.name == name) | (Winery.slug == slug)
+                    ).first()
+                    
+                    if not existing:
+                        db.add(Winery(
+                            slug=slug,
+                            name=name,
+                            region=region,
+                            description=desc,
+                            website=website,
+                            source_url=f"https://vino-svoe.ru/wineries/{slug}"
+                        ))
+                        added += 1
+                    else:
+                        if desc and len(desc) > len(existing.description or ""):
+                            existing.description = desc
+                        if not existing.slug:
+                            existing.slug = slug
+                except Exception:
+                    continue
+        db.commit()
+        print(f"[✓] vino-svoe.ru: успешно добавлено/обновлено {added} виноделен")
 
 def parse_vino_ru(db: SessionLocal):
     """Парсинг каталога vino.ru"""
     print("[*] Запуск скрапинга vino.ru...")
     url = "https://vino.ru/atlas-rossiyskikh-vinodelen/letters/"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        res = requests.get(url, headers=HEADERS, timeout=8)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "lxml")
             items = soup.select("a[href*='/atlas-rossiyskikh-vinodelen/']")
@@ -110,68 +135,40 @@ def parse_vino_ru(db: SessionLocal):
                     continue
             
             db.commit()
-            print(f"[✓] vino.ru: обработано {added} виноделен")
+            print(f"[✓] vino.ru: успешно добавлено {added} виноделен")
     except Exception as e:
         print(f"[!] Ошибка vino.ru: {e}")
 
 def seed_fallback_data(db: SessionLocal):
-    """Качественные описания для основных российских производителей"""
+    """Гарантированные данные базовых виноделен"""
     default_wineries = [
         {
             "slug": "51-parallel-winery",
             "name": "51 Parallel Winery",
             "region": "Краснодарский край",
-            "description": "51 Parallel Winery — динамично развивающийся винодельческий проект на терруарах Северо-Западного Кавказа. Название связано с географическим расположением виноградников, микроклимат которых создает уникальные условия для вызревания классических сортов винограда.",
+            "description": "Инновационный винодельческий проект на 51-й параллели с уникальным терруаром.",
             "website": "https://vino-svoe.ru/wineries/51-parallel-winery"
         },
         {
             "slug": "abrau-durso",
             "name": "Абрау-Дюрсо",
             "region": "Краснодарский край (Новороссийск)",
-            "description": "Русский винный дом «Абрау-Дюрсо» — ведущий производитель игристых и тихих вин России, основанный в 1870 году по указу императора Александра II. Специализируется на премиальных игристых винах по классическому французскому методу.",
+            "description": "Русский винный дом «Абрау-Дюрсо» — ведущий производитель игристых и тихих вин России с историей с 1870 года.",
             "website": "https://abraudurso.ru"
         },
         {
             "slug": "vedernikov",
             "name": "Винодельня Ведерниковъ",
             "region": "Ростовская область (Долина Дона)",
-            "description": "Винодельня «Ведерниковъ» — пионер и признанный лидер в восстановлении и производстве вин из автохтонных сортов винограда Дона (Красностоп Золотовский, Сибирьковый, Цимлянский Чёрный).",
+            "description": "Флагман донского автохтонного виноделия (Красностоп Золотовский, Сибирьковый).",
             "website": "https://vedernikovwine.ru"
         },
         {
             "slug": "chateau-de-talu",
             "name": "Château de Talu",
             "region": "Краснодарский край (Геленджик)",
-            "description": "Château de Talu — современная винодельня премиум-класса в французском стиле. Виноградники расположены на Толстом мысе Геленджикской бухты.",
+            "description": "Премиальное винодельческое хозяйство в французском стиле на берегу Чёрного моря.",
             "website": "https://chateaudetalu.ru"
-        },
-        {
-            "slug": "fanagoria",
-            "name": "Фанагория",
-            "region": "Краснодарский край (Тамань)",
-            "description": "Одно из крупнейших винодельческих предприятий России полного цикла. Имеет собственные виноградники на Таманском полуострове и собственное бондарное производство.",
-            "website": "https://fanagoria.ru"
-        },
-        {
-            "slug": "massandra",
-            "name": "Массандра",
-            "region": "Крым (Ялта)",
-            "description": "Старейшее и легендарное винодельческое предприятие Крыма с богатейшей коллекцией вин. Известно десертными, креплеными и марочными винами.",
-            "website": "https://massandra.su"
-        },
-        {
-            "slug": "zolotaya-balka",
-            "name": "Золотая Балка",
-            "region": "Крым (Севастополь)",
-            "description": "Крупный винодельческий комплекс в Балаклавской долине. Специализируется на игристых и тихих винах из собственного винограда.",
-            "website": "https://zolotayabalka.ru"
-        },
-        {
-            "slug": "usadba-divnomorskoe",
-            "name": "Усадьба Дивноморское",
-            "region": "Краснодарский край (Геленджик)",
-            "description": "Премиальное терруарное винодельческое хозяйство, расположенное на самом берегу Чёрного моря в окружении пицундских сосен.",
-            "website": "https://usadba-divnomorskoe.ru"
         }
     ]
     
